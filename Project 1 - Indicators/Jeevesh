@@ -1,0 +1,149 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import classification_report, accuracy_score
+
+# Fetch Meta stock data
+ticker = 'META'
+df = yf.download(ticker, start='2022-01-01', end='2025-09-01')
+
+# Calculate indicators
+close = df['Close']
+
+# EMA (20)
+df['EMA20'] = close.ewm(span=20, adjust=False).mean()
+
+# SMA (50)
+df['SMA50'] = close.rolling(window=50).mean()
+
+# Bollinger Bands (SMA50 ± 2 std dev)
+rolling_std = close.rolling(window=50).std()
+df['Bollinger_Upper'] = df['SMA50'] + 2 * rolling_std.iloc[:, 0]
+df['Bollinger_Lower'] = df['SMA50'] - 2 * rolling_std.iloc[:, 0]
+
+# RSI (14)
+delta = close.diff()
+gain = delta.where(delta > 0, 0)
+loss = -delta.where(delta < 0, 0)
+avg_gain = gain.rolling(window=14).mean()
+avg_loss = loss.rolling(window=14).mean()
+rs = avg_gain / avg_loss.replace(0, np.nan)
+df['RSI'] = 100 - (100 / (1 + rs))
+
+# MACD (12-26 EMAs)
+ema_12 = close.ewm(span=12, adjust=False).mean()
+ema_26 = close.ewm(span=26, adjust=False).mean()
+df['MACD'] = ema_12 - ema_26
+df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
+# Fibonacci Retracement (Using entire high and low)
+high = df['High'].max()
+low = df['Low'].min()
+diff = high - low
+
+fib_levels = {
+    'Fib_0%': high,
+    'Fib_23.6%': high - 0.236 * diff,
+    'Fib_38.2%': high - 0.382 * diff,
+    'Fib_50%': high - 0.5 * diff,
+    'Fib_61.8%': high - 0.618 * diff,
+    'Fib_100%': low
+}
+
+# Prepare features for ML model
+# Use today's features to predict if next day's close price will go up (1) or not (0)
+df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+
+# Drop rows with NaN values created by indicators
+df_model = df.dropna()
+
+# Use only indicators as features
+features = ['EMA20', 'SMA50', 'RSI', 'MACD', 'MACD_signal',
+            'Bollinger_Upper', 'Bollinger_Lower']
+
+X = df_model[features]
+y = df_model['Target']
+
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=False, test_size=0.2)
+
+# Enhanced hyperparameter grid for Decision Tree
+param_grid = {
+    'criterion': ['gini', 'entropy'],
+    'max_depth': list(range(3, 21)),
+    'min_samples_split': [2, 5, 10, 15],
+    'min_samples_leaf': [1, 2, 4, 6],
+    'max_features': [None, 'sqrt'] # Removed 'log2'
+}
+
+grid_search = GridSearchCV(
+    DecisionTreeClassifier(random_state=0),
+    param_grid,
+    cv=5,
+    n_jobs=-1,
+    verbose=2,
+    scoring='accuracy'
+)
+
+grid_search.fit(X_train, y_train)
+
+best_model = grid_search.best_estimator_
+print(f"Best Decision Tree Parameters: {grid_search.best_params_}")
+print(f"Best Cross-Validation Accuracy: {grid_search.best_score_:.4f}")
+
+# Prediction & evaluation
+y_pred = best_model.predict(X_test)
+print("Test Accuracy:", accuracy_score(y_test, y_pred))
+print(classification_report(y_test, y_pred))
+
+# Plot Feature Importance
+importances = best_model.feature_importances_
+indices = np.argsort(importances)[::-1]
+feature_names = X.columns
+
+plt.figure(figsize=(10,6))
+plt.title("Feature Importances - Decision Tree")
+plt.bar(range(len(importances)), importances[indices])
+plt.xticks(range(len(importances)), feature_names[indices], rotation=45)
+plt.show()
+
+# Plotting stock close price with indicators
+plt.figure(figsize=(15,10))
+plt.plot(df['Close'], label='Close Price')
+plt.plot(df['EMA20'], label='EMA 20')
+plt.plot(df['SMA50'], label='SMA 50')
+plt.fill_between(df.index, df['Bollinger_Upper'], df['Bollinger_Lower'], color='grey', alpha=0.3, label='Bollinger Bands')
+plt.title(f"{ticker} Close Price and Technical Indicators")
+plt.legend()
+plt.show()
+
+# Plot RSI and MACD
+fig, axs = plt.subplots(2, 1, figsize=(15,8), sharex=True)
+
+axs[0].plot(df['RSI'], label='RSI', color='purple')
+axs[0].axhline(70, color='red', linestyle='--')
+axs[0].axhline(30, color='green', linestyle='--')
+axs[0].set_title('RSI')
+axs[0].legend()
+
+axs[1].plot(df['MACD'], label='MACD', color='blue')
+axs[1].plot(df['MACD_signal'], label='MACD Signal', color='red')
+axs[1].set_title('MACD')
+axs[1].legend()
+
+plt.show()
+
+# Plot Fibonacci Retracement separately on price chart
+plt.figure(figsize=(15,8))
+plt.plot(df['Close'], label='Close Price')
+
+for level_name, level_price in fib_levels.items():
+    plt.hlines(level_price.iloc[0], df.index[0], df.index[-1], colors='orange', linestyles='dashed')
+    plt.text(df.index[-1], level_price.iloc[0], f'{level_name} {level_price.iloc[0]:.2f}', color='orange')
+
+plt.title(f"{ticker} Close Price with Fibonacci Retracement Levels")
+plt.legend()
+plt.show()
